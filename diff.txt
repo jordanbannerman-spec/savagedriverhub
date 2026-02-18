@@ -1,0 +1,561 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Driver Route Tracker</title>
+
+  <!-- Leaflet -->
+  <link
+    rel="stylesheet"
+    href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+    integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
+    crossorigin=""
+  />
+  <script
+    src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+    integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
+    crossorigin=""
+  ></script>
+
+  <style>
+    :root { color-scheme: light; }
+    body { margin: 0; font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; }
+    #map { height: 52vh; width: 100%; }
+    .wrap { padding: 12px; display: grid; gap: 10px; }
+    .row { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+    .card { border: 1px solid #e5e7eb; border-radius: 14px; padding: 12px; box-shadow: 0 1px 3px rgba(0,0,0,.05); }
+    .card h3 { margin: 0 0 8px; font-size: 14px; color: #111827; }
+    .big { font-size: 28px; font-weight: 700; letter-spacing: -0.02em; }
+    .muted { color: #6b7280; font-size: 12px; }
+    button, input, select, textarea {
+      font: inherit; padding: 10px 12px; border-radius: 12px;
+      border: 1px solid #d1d5db; background: #fff;
+    }
+    button { cursor: pointer; }
+    button.primary { background: #111827; color: #fff; border-color: #111827; }
+    button.danger { background: #b91c1c; color: #fff; border-color: #b91c1c; }
+    button:disabled { opacity: .5; cursor: not-allowed; }
+    textarea { width: 100%; min-height: 70px; resize: vertical; }
+    .controls { display: grid; gap: 8px; }
+    .pill { display: inline-block; padding: 4px 10px; border-radius: 999px; background: #f3f4f6; font-size: 12px; }
+    .stops { display: grid; gap: 8px; max-height: 200px; overflow: auto; }
+    .stopItem { border: 1px dashed #d1d5db; border-radius: 12px; padding: 10px; }
+    .stopItem b { display: block; margin-bottom: 4px; }
+    .footerRow { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    @media (max-width: 640px) { .row, .footerRow { grid-template-columns: 1fr; } }
+  </style>
+</head>
+
+<body>
+  <div id="map"></div>
+
+  <div class="wrap">
+    <div class="row">
+      <div class="card">
+        <h3>Distance</h3>
+        <div class="big"><span id="miles">0.00</span> <span class="muted">mi</span></div>
+        <div class="muted">(<span id="km">0.00</span> km)</div>
+      </div>
+      <div class="card">
+        <h3>Speed</h3>
+        <div class="big"><span id="mph">0</span> <span class="muted">mph</span></div>
+        <div class="muted">Max: <span id="maxMph">0</span> mph • Accuracy: <span id="acc">–</span> m</div>
+      </div>
+    </div>
+
+    <div class="row">
+      <div class="card">
+        <h3>Timers</h3>
+        <div>
+          <span class="pill">Drive: <span id="driveTime">00:00:00</span></span>
+          <span class="pill">Stop: <span id="stopTime">00:00:00</span></span>
+        </div>
+        <div class="muted" style="margin-top:8px;">
+          Auto-detect stop if speed stays under 2 mph for ~20s.
+        </div>
+      </div>
+
+      <div class="card">
+        <h3>Trip Controls</h3>
+        <div class="controls">
+          <button class="primary" id="startBtn">Start Tracking</button>
+          <button id="pauseBtn" disabled>Pause</button>
+          <button class="danger" id="endBtn" disabled>End Trip</button>
+        </div>
+        <div class="muted" style="margin-top:8px;">
+          Tip: On iPhone, install to Home Screen for better GPS behavior.
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>Add Stop</h3>
+      <div class="row">
+        <select id="stopType">
+          <option>Pickup</option>
+          <option>Drop</option>
+          <option>Fuel</option>
+          <option>Break</option>
+          <option>Weigh Station</option>
+          <option>Maintenance</option>
+          <option>Other</option>
+        </select>
+        <input id="stopNote" placeholder="Note (dock #, load ID, etc.)" />
+      </div>
+      <div class="footerRow" style="margin-top:10px;">
+        <button id="addStopBtn" disabled>Add Stop at Current Location</button>
+        <button id="exportBtn" disabled>Export CSV</button>
+      </div>
+
+      <div style="margin-top:10px;">
+        <div class="muted">Stops</div>
+        <div id="stopsList" class="stops"></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>Saved Trips (Local)</h3>
+      <div class="footerRow">
+        <select id="savedTrips"></select>
+        <button id="loadTripBtn">Load</button>
+      </div>
+      <div class="footerRow" style="margin-top:10px;">
+        <button id="deleteTripBtn" class="danger">Delete</button>
+        <button id="clearAllBtn">Clear All</button>
+      </div>
+      <div class="muted" style="margin-top:8px;">
+        Stored in your browser (localStorage). No server.
+      </div>
+    </div>
+  </div>
+
+<script>
+/** -------- Utilities -------- */
+const $ = (id) => document.getElementById(id);
+
+function haversineMeters(a, b) {
+  const R = 6371000;
+  const toRad = (d) => d * Math.PI / 180;
+  const dLat = toRad(b.lat - a.lat);
+  const dLon = toRad(b.lng - a.lng);
+  const lat1 = toRad(a.lat), lat2 = toRad(b.lat);
+  const s1 = Math.sin(dLat/2), s2 = Math.sin(dLon/2);
+  const h = s1*s1 + Math.cos(lat1)*Math.cos(lat2) * s2*s2;
+  return 2 * R * Math.asin(Math.min(1, Math.sqrt(h)));
+}
+
+function fmtHMS(ms) {
+  const total = Math.floor(ms / 1000);
+  const h = String(Math.floor(total / 3600)).padStart(2,'0');
+  const m = String(Math.floor((total % 3600) / 60)).padStart(2,'0');
+  const s = String(total % 60).padStart(2,'0');
+  return `${h}:${m}:${s}`;
+}
+
+function nowIso() { return new Date().toISOString(); }
+
+/** -------- Map Setup -------- */
+const map = L.map('map', { zoomControl: true }).setView([51.0447, -114.0719], 12); // Calgary default
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+  maxZoom: 19,
+  attribution: '&copy; OpenStreetMap'
+}).addTo(map);
+
+const routeLine = L.polyline([], { weight: 5 }).addTo(map);
+let driverMarker = L.circleMarker([51.0447, -114.0719], { radius: 8 }).addTo(map);
+
+/** -------- Trip State -------- */
+let watchId = null;
+let tracking = false;
+let paused = false;
+
+let points = []; // {lat,lng,t,acc,speedMps}
+let stops = [];  // {type,note,lat,lng,t}
+
+let totalMeters = 0;
+let maxMph = 0;
+
+let driveMs = 0;
+let stopMs = 0;
+
+let lastTick = null;
+let isStopped = false;
+let underSpeedSince = null;
+
+const STOP_SPEED_MPH = 2;
+const STOP_DEBOUNCE_MS = 20000; // 20s
+
+/** -------- UI Updates -------- */
+function updateStats(latest = null) {
+  const miles = totalMeters / 1609.344;
+  const km = totalMeters / 1000;
+
+  $('miles').textContent = miles.toFixed(2);
+  $('km').textContent = km.toFixed(2);
+
+  if (latest) {
+    const mph = Math.max(0, Math.round((latest.speedMps || 0) * 2.236936));
+    $('mph').textContent = String(mph);
+    $('maxMph').textContent = String(Math.round(maxMph));
+    $('acc').textContent = latest.acc != null ? Math.round(latest.acc) : '–';
+  }
+  $('driveTime').textContent = fmtHMS(driveMs);
+  $('stopTime').textContent = fmtHMS(stopMs);
+}
+
+function renderStops() {
+  const box = $('stopsList');
+  box.innerHTML = '';
+  if (stops.length === 0) {
+    const div = document.createElement('div');
+    div.className = 'muted';
+    div.textContent = 'No stops yet.';
+    box.appendChild(div);
+    return;
+  }
+  for (const s of stops.slice().reverse()) {
+    const div = document.createElement('div');
+    div.className = 'stopItem';
+    div.innerHTML = `
+      <b>${s.type}</b>
+      <div class="muted">${new Date(s.t).toLocaleString()}</div>
+      <div>${(s.note || '').replace(/</g,'&lt;')}</div>
+      <div class="muted">(${s.lat.toFixed(5)}, ${s.lng.toFixed(5)})</div>
+    `;
+    box.appendChild(div);
+  }
+}
+
+/** -------- Tracking Logic -------- */
+function startTrip() {
+  if (!navigator.geolocation) {
+    alert('Geolocation not supported on this device/browser.');
+    return;
+  }
+
+  tracking = true;
+  paused = false;
+
+  points = [];
+  stops = [];
+  totalMeters = 0;
+  maxMph = 0;
+  driveMs = 0;
+  stopMs = 0;
+  lastTick = Date.now();
+  isStopped = false;
+  underSpeedSince = null;
+
+  routeLine.setLatLngs([]);
+  renderStops();
+  updateStats();
+
+  $('startBtn').disabled = true;
+  $('pauseBtn').disabled = false;
+  $('endBtn').disabled = false;
+  $('addStopBtn').disabled = false;
+  $('exportBtn').disabled = false;
+
+  watchId = navigator.geolocation.watchPosition(onPos, onErr, {
+    enableHighAccuracy: true,
+    maximumAge: 1000,
+    timeout: 15000
+  });
+}
+
+function pauseTrip() {
+  if (!tracking) return;
+  paused = !paused;
+  $('pauseBtn').textContent = paused ? 'Resume' : 'Pause';
+  if (paused) {
+    // stop timer increments until resumed
+  } else {
+    lastTick = Date.now();
+  }
+}
+
+function endTrip() {
+  if (!tracking) return;
+  tracking = false;
+  paused = false;
+
+  if (watchId != null) navigator.geolocation.clearWatch(watchId);
+  watchId = null;
+
+  $('startBtn').disabled = false;
+  $('pauseBtn').disabled = true;
+  $('endBtn').disabled = true;
+  $('addStopBtn').disabled = true;
+
+  $('pauseBtn').textContent = 'Pause';
+
+  // Auto-save
+  saveTrip();
+  refreshSavedTrips();
+  alert('Trip ended and saved locally.');
+}
+
+function onPos(pos) {
+  if (!tracking || paused) return;
+
+  const t = Date.now();
+  const dt = lastTick ? (t - lastTick) : 0;
+  lastTick = t;
+
+  const lat = pos.coords.latitude;
+  const lng = pos.coords.longitude;
+  const acc = pos.coords.accuracy;
+  const speedMps = (pos.coords.speed != null && !Number.isNaN(pos.coords.speed)) ? pos.coords.speed : 0;
+
+  const mph = Math.max(0, speedMps * 2.236936);
+  maxMph = Math.max(maxMph, mph);
+
+  // Stop detection
+  if (mph < STOP_SPEED_MPH) {
+    if (!underSpeedSince) underSpeedSince = t;
+    if ((t - underSpeedSince) >= STOP_DEBOUNCE_MS) isStopped = true;
+  } else {
+    underSpeedSince = null;
+    isStopped = false;
+  }
+
+  if (dt > 0) {
+    if (isStopped) stopMs += dt;
+    else driveMs += dt;
+  }
+
+  const current = { lat, lng, t: new Date(t).toISOString(), acc, speedMps };
+
+  // Distance: ignore huge jumps (GPS glitches)
+  const prev = points.length ? points[points.length - 1] : null;
+  if (prev) {
+    const d = haversineMeters(prev, current);
+
+    // Basic anti-glitch filter:
+    // - ignore if accuracy is terrible
+    // - ignore if jump implies > 110 mph
+    const impliedMps = dt > 0 ? (d / (dt / 1000)) : 0;
+    const impliedMph = impliedMps * 2.236936;
+
+    const accOk = (acc == null) || acc <= 60; // meters
+    const speedOk = impliedMph <= 110;
+
+    if (accOk && speedOk) {
+      totalMeters += d;
+      points.push(current);
+      routeLine.addLatLng([lat, lng]);
+    } else {
+      // Still record point for UI marker, but don't add to route distance
+      points.push(current);
+    }
+  } else {
+    points.push(current);
+    routeLine.addLatLng([lat, lng]);
+    map.setView([lat, lng], 15);
+  }
+
+  driverMarker.setLatLng([lat, lng]);
+  // keep map reasonably centered
+  if (points.length % 5 === 0) map.panTo([lat, lng], { animate: true });
+
+  updateStats(current);
+}
+
+function onErr(err) {
+  console.error(err);
+  // Soft warning
+  if (tracking) {
+    $('acc').textContent = '–';
+  }
+}
+
+/** -------- Stops -------- */
+function addStop() {
+  if (!points.length) {
+    alert('No GPS points yet. Wait for location lock.');
+    return;
+  }
+  const last = points[points.length - 1];
+  const type = $('stopType').value;
+  const note = $('stopNote').value.trim();
+
+  const s = { type, note, lat: last.lat, lng: last.lng, t: nowIso() };
+  stops.push(s);
+
+  L.marker([s.lat, s.lng]).addTo(map).bindPopup(`<b>${type}</b><br>${(note || '').replace(/</g,'&lt;')}`);
+  $('stopNote').value = '';
+  renderStops();
+}
+
+/** -------- Save / Load -------- */
+const LS_KEY = 'driver_route_tracker_trips_v1';
+
+function loadAllTrips() {
+  try {
+    return JSON.parse(localStorage.getItem(LS_KEY) || '[]');
+  } catch {
+    return [];
+  }
+}
+
+function writeAllTrips(trips) {
+  localStorage.setItem(LS_KEY, JSON.stringify(trips));
+}
+
+function saveTrip() {
+  const trips = loadAllTrips();
+  const startTime = points[0]?.t || nowIso();
+  const endTime = points[points.length - 1]?.t || nowIso();
+
+  const trip = {
+    id: crypto?.randomUUID ? crypto.randomUUID() : String(Date.now()),
+    name: `Trip ${new Date(startTime).toLocaleString()}`,
+    startTime,
+    endTime,
+    totalMeters,
+    driveMs,
+    stopMs,
+    maxMph,
+    points,
+    stops
+  };
+
+  trips.unshift(trip);
+  writeAllTrips(trips.slice(0, 30)); // keep last 30
+}
+
+function refreshSavedTrips() {
+  const trips = loadAllTrips();
+  const sel = $('savedTrips');
+  sel.innerHTML = '';
+  if (trips.length === 0) {
+    const opt = document.createElement('option');
+    opt.value = '';
+    opt.textContent = 'No saved trips';
+    sel.appendChild(opt);
+    return;
+  }
+  for (const t of trips) {
+    const opt = document.createElement('option');
+    opt.value = t.id;
+    const mi = (t.totalMeters / 1609.344).toFixed(1);
+    opt.textContent = `${t.name} • ${mi} mi`;
+    sel.appendChild(opt);
+  }
+}
+
+function loadTripById(id) {
+  const trips = loadAllTrips();
+  return trips.find(t => t.id === id) || null;
+}
+
+function loadTrip() {
+  const id = $('savedTrips').value;
+  if (!id) return;
+  const t = loadTripById(id);
+  if (!t) return;
+
+  // Stop tracking if active
+  if (watchId != null) navigator.geolocation.clearWatch(watchId);
+  watchId = null;
+  tracking = false;
+  paused = false;
+
+  points = t.points || [];
+  stops = t.stops || [];
+  totalMeters = t.totalMeters || 0;
+  driveMs = t.driveMs || 0;
+  stopMs = t.stopMs || 0;
+  maxMph = t.maxMph || 0;
+
+  routeLine.setLatLngs(points.map(p => [p.lat, p.lng]));
+  if (points.length) {
+    const last = points[points.length - 1];
+    driverMarker.setLatLng([last.lat, last.lng]);
+    map.fitBounds(routeLine.getBounds(), { padding: [20, 20] });
+    updateStats(last);
+  } else {
+    updateStats();
+  }
+
+  renderStops();
+  alert('Loaded saved trip (view-only).');
+}
+
+function deleteTrip() {
+  const id = $('savedTrips').value;
+  if (!id) return;
+  const trips = loadAllTrips().filter(t => t.id !== id);
+  writeAllTrips(trips);
+  refreshSavedTrips();
+}
+
+function clearAllTrips() {
+  localStorage.removeItem(LS_KEY);
+  refreshSavedTrips();
+  alert('Cleared all saved trips.');
+}
+
+/** -------- Export -------- */
+function exportCsv() {
+  if (!points.length) {
+    alert('Nothing to export yet.');
+    return;
+  }
+
+  const header = [
+    'type','timestamp','lat','lng','accuracy_m','speed_mph','note'
+  ];
+
+  const rows = [];
+
+  // GPS points
+  for (const p of points) {
+    const mph = Math.max(0, (p.speedMps || 0) * 2.236936);
+    rows.push(['point', p.t, p.lat, p.lng, p.acc ?? '', mph.toFixed(1), '']);
+  }
+
+  // Stops
+  for (const s of stops) {
+    rows.push(['stop', s.t, s.lat, s.lng, '', '', (s.type + (s.note ? `: ${s.note}` : ''))]);
+  }
+
+  const summary = [
+    ['summary', nowIso(), '', '', '', '', `miles=${(totalMeters/1609.344).toFixed(2)} drive=${fmtHMS(driveMs)} stop=${fmtHMS(stopMs)} max_mph=${Math.round(maxMph)}`]
+  ];
+
+  const csv = [header, ...rows, ...summary]
+    .map(r => r.map(v => {
+      const s = String(v ?? '');
+      return /[,"\n]/.test(s) ? `"${s.replace(/"/g,'""')}"` : s;
+    }).join(','))
+    .join('\n');
+
+  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `trip_${new Date().toISOString().slice(0,19).replace(/[:T]/g,'-')}.csv`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+/** -------- Wire up UI -------- */
+$('startBtn').addEventListener('click', startTrip);
+$('pauseBtn').addEventListener('click', pauseTrip);
+$('endBtn').addEventListener('click', endTrip);
+$('addStopBtn').addEventListener('click', addStop);
+$('exportBtn').addEventListener('click', exportCsv);
+
+$('loadTripBtn').addEventListener('click', loadTrip);
+$('deleteTripBtn').addEventListener('click', deleteTrip);
+$('clearAllBtn').addEventListener('click', clearAllTrips);
+
+refreshSavedTrips();
+</script>
+</body>
+</html>
